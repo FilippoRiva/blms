@@ -1,4 +1,4 @@
-"satisfaction","Customer.Type","Age","Type.of.Travel","Flight.Distance","Seat.comfort","Departure.Arrival.time.convenient","Food.and.drink","Gate.location","Inflight.wifi.service","Inflight.entertainment","Online.support","Ease.of.Online.booking","On.board.service","Leg.room.service","Baggage.handling","Checkin.service","Cleanliness","Online.boarding","Departure.Delay.in.Minutes","Arrival.Delay.in.Minutes","Class.Eco","Class.EcoPlus"
+"satisfaction","customer_type","age","type_of_travel","flight_distance","seat_comfort","departure_arrival_convenient","food_and_drink","gate_location","inflight_wifi_service","inflight_entertainment","online_support","ease_of_online_booking","on_board_service","leg_room_service","baggage_handling","checkin_service","cleanliness","online_boarding","departure_delay","arrival_delay","class_eco","class_eco_plus"
 1,0,16,0,2150,5,0,5,2,2,5,2,2,2,1,4,5,5,2,0,0,1,0
 1,1,18,0,2282,5,5,5,5,4,4,4,4,1,2,3,1,3,4,0,8,0,0
 0,1,33,0,3640,2,1,1,1,3,3,3,2,2,2,2,1,2,1,0,0,0,0

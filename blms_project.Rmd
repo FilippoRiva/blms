@@ -14,27 +14,31 @@ output: html_document
 library("BAS")
 library("tidyr")
 library("dplyr")
+library("ggplot2")
 library("rjags")
 library("bayesplot")
+
+# Setup
 set.seed(42) # for reproducibility
+rm(list=ls()) # clear environment
 ```
 
 ## 1. Data Analysis and Pre-processing
 
-> Name: Airline Customer satisfaction link : <https://www.kaggle.com/datasets/raminhuseyn/airline-customer-satisfaction>
+-   Name: Airline Customer satisfaction
+-   Source : [Kaggle](https://www.kaggle.com/datasets/raminhuseyn/airline-customer-satisfaction)
 
 ```{r}
 # Loading the full dataset
-rm(list=ls())
 data = read.csv("data/Airline_customer_satisfaction.csv")
 data = data.frame(data)
-print(paste("Total Number of Rows :", dim(data)[1]))
+cat(paste("Total number of rows :", dim(data)[1]))
 ```
 
 ```{r}
 # Removing NA rows
 data <- drop_na(data)
-print(paste("Rows without NA :", dim(data)[1]))
+cat(paste("Total number of rows without NA :", dim(data)[1]))
 ```
 
 ```{r}
@@ -43,7 +47,36 @@ index = sample(1:nrow(data),2000,replace=F)
 data = data[index,]
 row.names(data) = 1:nrow(data)
 data = data.frame(data)
-dim(data)
+cat(paste("Size of the reduced dataset: ",dim(data)[1],"x", dim(data)[2]))
+```
+
+```{r}
+# Renaming columns with snake case
+data <- data %>%
+  rename(
+    satisfaction = satisfaction,
+    customer_type = Customer.Type,
+    age = Age,
+    type_of_travel = Type.of.Travel,
+    class = Class,
+    flight_distance = Flight.Distance,
+    seat_comfort = Seat.comfort,
+    departure_arrival_convenient = Departure.Arrival.time.convenient,
+    food_and_drink = Food.and.drink,
+    gate_location = Gate.location,
+    inflight_wifi_service = Inflight.wifi.service,
+    inflight_entertainment = Inflight.entertainment,
+    online_support = Online.support,
+    ease_of_online_booking = Ease.of.Online.booking,
+    on_board_service = On.board.service,
+    leg_room_service = Leg.room.service,
+    baggage_handling = Baggage.handling,
+    checkin_service = Checkin.service,
+    cleanliness = Cleanliness,
+    online_boarding = Online.boarding,
+    departure_delay = Departure.Delay.in.Minutes,
+    arrival_delay = Arrival.Delay.in.Minutes
+  )
 ```
 
 ```{r}
@@ -51,50 +84,53 @@ head(data)
 ```
 
 ```{r}
-boxplot(data$Arrival.Delay.in.Minutes ~ data$satisfaction, 
-        xlab="satisfaction", ylab="Arrival.Delay", main="Airline")
+ggplot(data %>% filter(arrival_delay > 0), # filter to allow logarithmic scale in the viz
+       aes(x = satisfaction, y = arrival_delay)) +
+  geom_boxplot() +
+  labs(x = "Satisfaction", 
+       y = "Arrival Delay",  
+       title = "Airline Customer Satisfaction Dataset") +
+  scale_y_log10()
+```
+
+```{r}
+ggplot(data, aes(x = type_of_travel, fill = satisfaction)) +
+  geom_bar(position = "fill") +
+  labs(x = "Type of Travel", 
+       y = "Proportion",
+       title = "Satisfaction by Type of Travel") 
 ```
 
 ```{r}
 # Looking at the unique values for categorical variables
-unique(data$satisfaction)
-unique(data$Customer.Type)
-unique(data$Type.of.Travel)
-unique(data$Class)
+cat("Unique values for satisfaction:\n", 
+    paste(unique(data$satisfaction), collapse = ", "), "\n\n")
+cat("Unique values for customer_type:\n",
+    paste(unique(data$customer_type), collapse = ", "), "\n\n")
+cat("Unique values for type_of_travel:\n",
+    paste(unique(data$type_of_travel), collapse = ", "), "\n\n")
+cat("Unique values for class:\n",
+    paste(unique(data$class), collapse = ", "), "\n")
+
 ```
 
 ```{r}
 # Handling Categorical Variables and creating dummy variables
-to_numerical <- function(categorical){
+to_numerical <- function(categorical, name){
   factor <- as.factor(categorical)
-  print(paste("Levels :", paste(levels(factor), '[', 0:1, ']', collapse=', ')))
+  cat(paste("Levels for", name, ":\n", paste("'", levels(factor),"' -> ", "[", 0:1, "]", sep="", collapse=", "), "\n\n"))
   return (as.numeric(factor) - 1) 
 }
 
-data$satisfaction <- to_numerical(data$satisfaction)
-data$Customer.Type <- to_numerical(data$Customer.Type)
-data$Type.of.Travel <- to_numerical(data$Type.of.Travel)
+data$satisfaction <- to_numerical(data$satisfaction, "satisfaction")
+data$customer_type <- to_numerical(data$customer_type, "customer_type")
+data$type_of_travel <- to_numerical(data$type_of_travel, "type_of_travel")
 
 ## dummy variables dropping "Business" due to linear dependence
-data$Class.Eco <- ifelse(data$Class == "Eco", 1, 0)
-data$Class.EcoPlus <- ifelse(data$Class == "Eco Plus", 1, 0)
-data$Class <- NULL
-
-#model.matrix(satisfaction ~ ., data = data)[, -1]
-```
-
-```{r}
-print(colnames(data))
-```
-
-```{r}
-suggested_data <- data %>% select(satisfaction, Age, Seat.comfort, Flight.Distance, Class.Eco, Class.EcoPlus, Departure.Delay.in.Minutes, Arrival.Delay.in.Minutes)
-par(mfrow=c(1, 1),pty="s")
-image(1:ncol(suggested_data),1:ncol(suggested_data),cor(suggested_data),
-      xlab="",ylab="",main="Correlation between predictors",
-      axes=FALSE)
-axis(1,1:ncol(suggested_data),colnames(suggested_data),las=2,cex.axis=0.9)
-axis(2,1:ncol(suggested_data),colnames(suggested_data),las=2,cex.axis=0.9)
+data$class_eco <- ifelse(data$class == "Eco", 1, 0)
+data$class_eco_plus <- ifelse(data$class == "Eco Plus", 1, 0)
+data$class <- NULL
+cat("The column 'class' has been dummyfied to :\n class_eco, class_eco_plus")
 ```
 
 ```{r}
@@ -105,6 +141,7 @@ head(data)
 ```{r}
 summary(data)
 ```
+
 
 ```{r}
 # Split data 
@@ -132,6 +169,35 @@ write.csv(splitted_dataset$train,"data/reduced_train.csv", row.names = F)
 ## 2. Variable Selection
 
 ```{r}
+# Computing correlation 
+cors <- cor(data)["satisfaction", ]
+cors <- cors[names(cors) != "satisfaction"]
+
+# Visualization
+gradient <- scale_fill_gradientn(
+  colors = c("darkblue", "lightsteelblue", "white", "orange", "darkred"),
+  values = scales::rescale(c(0, 0.25, 0.5, 0.75, 1)),
+  limits = c(-0.8, 0.8),
+)
+
+cors_df <- data.frame(
+  variable = names(cors),
+  correlation = cors
+)
+
+ggplot(cors_df, aes(x = variable, y = 1, fill = correlation)) +
+  geom_tile() +
+  gradient +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        axis.title = element_blank())+
+  labs(title = "Correlation with satisfaction")
+```
+
+
+
+
+```{r}
 # Loading train and test set
 data_test <- read.csv("data/reduced_test.csv")
 data_train <- read.csv("data/reduced_train.csv")
@@ -142,7 +208,7 @@ dim(splitted_dataset$test)
 
 ```{r}
 # Model Selection on the covariates suggested by the professor
-model <- bas.lm(satisfaction ~ Age + Seat.comfort + Flight.Distance + Class.Eco + Class.EcoPlus + Departure.Delay.in.Minutes + Arrival.Delay.in.Minutes, 
+model <- bas.lm(satisfaction ~ age + seat_comfort + flight_distance + class_eco + class_eco_plus + departure_delay + arrival_delay, 
        data=splitted_dataset$train, 
        prior = "BIC",
        alpha = 1,
@@ -154,7 +220,7 @@ summary(model)
 ```
 
 ```{r}
-image(model)
+image(model, cex.axis=0.7)
 ```
 
 ```{r}
@@ -163,16 +229,15 @@ full_model <- bas.lm(satisfaction ~ .,
        data=splitted_dataset$train,
        prior = "BIC",
        alpha = 1,
-       modelprior = uniform(),
-       include.always = ~ Arrival.Delay.in.Minutes)
+       modelprior = uniform())
 ```
 
 ```{r}
 summary(full_model)
 ```
 
-```{r}
-image(full_model)
+```{r, fig.width=12, fig.height=6}
+image(full_model, cex.axis=0.8, vlas=2)
 ```
 
 ```{r}
@@ -184,8 +249,8 @@ preds <- predict(
   se.fit=TRUE 
 ) 
 
-plot(splitted_dataset$test$Seat.comfort, preds$fit, col="darkorange", xlab="Seat.comfort", ylab="satisfaction", ylim=c(-0.1,1.1))
-points(splitted_dataset$test$Seat.comfort, splitted_dataset$test$satisfaction, col="steelblue")
+plot(splitted_dataset$test$seat_comfort, preds$fit, col="darkorange", xlab="Seat.comfort", ylab="satisfaction", ylim=c(-0.1,1.1))
+points(splitted_dataset$test$seat_comfort, splitted_dataset$test$satisfaction, col="steelblue")
 ```
 
 ## 3. Bernoulli Regression using JAGS
@@ -206,13 +271,13 @@ Y = as.numeric(
 
 X = as.matrix(
       splitted_dataset$train %>% 
-        select(Age, Seat.comfort, Class.Eco, Class.EcoPlus , Arrival.Delay.in.Minutes)
+        select(age, seat_comfort, class_eco, class_eco_plus, arrival_delay)
     )
 X = scale(X)
 
 Xp = as.matrix(
       splitted_dataset$test %>% 
-        select(Age, Seat.comfort, Class.Eco, Class.EcoPlus , Arrival.Delay.in.Minutes)
+        select(age, seat_comfort, class_eco, class_eco_plus, arrival_delay)
      )
 Xp = scale(Xp)
 
@@ -272,7 +337,6 @@ for (i in 1:16) {
 }
 ```
 
-
 ```{r}
 Ytrue = splitted_dataset$test %>% select(satisfaction)
 Ytrue = Ytrue[,1]
@@ -284,7 +348,6 @@ ppc_bars(Ytrue, Yrep)
 ppc_error_hist(Ytrue, Yrep[100:101,],bins=3)
 ```
 
-
 ## Bigger model
 
 ```{r}
@@ -295,13 +358,13 @@ Y = as.numeric(
 
 X = as.matrix(
       splitted_dataset$train %>% 
-        select(Customer.Type, Type.of.Travel, Seat.comfort, Departure.Arrival.time.convenient, Food.and.drink, Gate.location, Inflight.entertainment, Ease.of.Online.booking, On.board.service, Leg.room.service, Checkin.service, Arrival.Delay.in.Minutes)
+        select(customer_type, type_of_travel, seat_comfort, departure_arrival_convenient, food_and_drink, gate_location, inflight_entertainment, ease_of_online_booking, on_board_service, leg_room_service, checkin_service, arrival_delay)
     )
 X = scale(X)
 
 Xp = as.matrix(
       splitted_dataset$test %>% 
-        select(Customer.Type, Type.of.Travel, Seat.comfort, Departure.Arrival.time.convenient, Food.and.drink, Gate.location, Inflight.entertainment, Ease.of.Online.booking, On.board.service, Leg.room.service, Checkin.service, Arrival.Delay.in.Minutes)
+        select(customer_type, type_of_travel, seat_comfort, departure_arrival_convenient, food_and_drink, gate_location, inflight_entertainment, ease_of_online_booking, on_board_service, leg_room_service, checkin_service, arrival_delay)
      )
 Xp = scale(Xp)
 
@@ -373,6 +436,5 @@ ppc_bars(Ytrue, Yrep) + plot_title
 ```
 
 ```{r}
-ppc_error_hist(Ytrue, Yrep, bins=3)
+ppc_error_hist(Ytrue, Yrep[100:105,], bins=3)
 ```
-
