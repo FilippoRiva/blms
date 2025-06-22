@@ -215,8 +215,6 @@ Arrival Delay in Minutes. Total arrival delay in minutes.
 
 We select from the original dataset 1000 custumers.
 
-We select from the original dataset 1000 customers.
-
 Task. Perform a suitable regression for the categorical response
 variable "Satisfaction." Identify the variables that are correlated with
 "Satisfaction." A prediction exercise is required. You may discuss

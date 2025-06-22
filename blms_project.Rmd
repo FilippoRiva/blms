@@ -12,6 +12,10 @@ output: html_document
 ```{r}
 # Libraries imports
 library("BAS")
+library("tidyr")
+library("dplyr")
+library("rjags")
+library("bayesplot")
 set.seed(42) # for reproducibility
 ```
 
@@ -24,7 +28,13 @@ set.seed(42) # for reproducibility
 rm(list=ls())
 data = read.csv("data/Airline_customer_satisfaction.csv")
 data = data.frame(data)
-dim(data)
+print(paste("Total Number of Rows :", dim(data)[1]))
+```
+
+```{r}
+# Removing NA rows
+data <- drop_na(data)
+print(paste("Rows without NA :", dim(data)[1]))
 ```
 
 ```{r}
@@ -56,7 +66,9 @@ unique(data$Class)
 ```{r}
 # Handling Categorical Variables and creating dummy variables
 to_numerical <- function(categorical){
-  return (as.numeric(as.factor(categorical)) -1 ) 
+  factor <- as.factor(categorical)
+  print(paste("Levels :", paste(levels(factor), '[', 0:1, ']', collapse=', ')))
+  return (as.numeric(factor) - 1) 
 }
 
 data$satisfaction <- to_numerical(data$satisfaction)
@@ -67,6 +79,22 @@ data$Type.of.Travel <- to_numerical(data$Type.of.Travel)
 data$Class.Eco <- ifelse(data$Class == "Eco", 1, 0)
 data$Class.EcoPlus <- ifelse(data$Class == "Eco Plus", 1, 0)
 data$Class <- NULL
+
+#model.matrix(satisfaction ~ ., data = data)[, -1]
+```
+
+```{r}
+print(colnames(data))
+```
+
+```{r}
+suggested_data <- data %>% select(satisfaction, Age, Seat.comfort, Flight.Distance, Class.Eco, Class.EcoPlus, Departure.Delay.in.Minutes, Arrival.Delay.in.Minutes)
+par(mfrow=c(1, 1),pty="s")
+image(1:ncol(suggested_data),1:ncol(suggested_data),cor(suggested_data),
+      xlab="",ylab="",main="Correlation between predictors",
+      axes=FALSE)
+axis(1,1:ncol(suggested_data),colnames(suggested_data),las=2,cex.axis=0.9)
+axis(2,1:ncol(suggested_data),colnames(suggested_data),las=2,cex.axis=0.9)
 ```
 
 ```{r}
@@ -94,14 +122,14 @@ splitted_dataset <- train_test_split(data, 0.3)
 dim(splitted_dataset$train)
 dim(splitted_dataset$test)
 ```
+
 ```{r}
 # Storing the train and test set
 write.csv(splitted_dataset$test,"data/reduced_test.csv", row.names = F)
 write.csv(splitted_dataset$train,"data/reduced_train.csv", row.names = F)
 ```
 
-
-## 2. Modeling
+## 2. Variable Selection
 
 ```{r}
 # Loading train and test set
@@ -112,15 +140,21 @@ dim(splitted_dataset$train)
 dim(splitted_dataset$test)
 ```
 
-
 ```{r}
 # Model Selection on the covariates suggested by the professor
 model <- bas.lm(satisfaction ~ Age + Seat.comfort + Flight.Distance + Class.Eco + Class.EcoPlus + Departure.Delay.in.Minutes + Arrival.Delay.in.Minutes, 
-       data=splitted_dataset$train, prior = "BIC", alpha = 1, modelprior = uniform())
+       data=splitted_dataset$train, 
+       prior = "BIC",
+       alpha = 1,
+       modelprior = uniform())
 ```
 
 ```{r}
 summary(model)
+```
+
+```{r}
+image(model)
 ```
 
 ```{r}
@@ -138,7 +172,11 @@ summary(full_model)
 ```
 
 ```{r}
-# Get predictions on the test set using the suggested model
+image(full_model)
+```
+
+```{r}
+# Get predictions on the test set using BMA
 preds <- predict(
   model,
   newdata = splitted_dataset$test,
@@ -146,6 +184,195 @@ preds <- predict(
   se.fit=TRUE 
 ) 
 
-plot(splitted_dataset$test$Inflight.entertainment, preds$fit, col="darkorange", xlab="entertainment", ylab="satisfaction", ylim=c(-0.1,1.1))
-points(splitted_dataset$test$Inflight.entertainment, splitted_dataset$test$satisfaction, col="steelblue")
+plot(splitted_dataset$test$Seat.comfort, preds$fit, col="darkorange", xlab="Seat.comfort", ylab="satisfaction", ylim=c(-0.1,1.1))
+points(splitted_dataset$test$Seat.comfort, splitted_dataset$test$satisfaction, col="steelblue")
 ```
+
+## 3. Bernoulli Regression using JAGS
+
+$$
+\begin{align*}
+  & y_i \mid p_i \overset{ind}\sim \mathscr{B}e(p_i), &\qquad i=1,\ldots,n \\
+  & \log\left(\frac{p_i}{1-p_i}\right) = \beta_0 + x_i \beta, &\qquad \rightarrow\text{logistic link} \\
+  &\beta_j \overset{iid}\sim \mathscr{N}(0,100), &\qquad j=1,\ldots,p
+\end{align*}
+$$
+
+```{r}
+# Preparing the parameters
+Y = as.numeric(
+      splitted_dataset$train$satisfaction
+    )
+
+X = as.matrix(
+      splitted_dataset$train %>% 
+        select(Age, Seat.comfort, Class.Eco, Class.EcoPlus , Arrival.Delay.in.Minutes)
+    )
+X = scale(X)
+
+Xp = as.matrix(
+      splitted_dataset$test %>% 
+        select(Age, Seat.comfort, Class.Eco, Class.EcoPlus , Arrival.Delay.in.Minutes)
+     )
+Xp = scale(Xp)
+
+n = dim(X)[1] # number of samples in the training data set
+npred = dim(Xp)[1] # number of samples in the test data set
+par = dim(X)[2] # dimension on the linear model
+
+data_list <- list(X=X, Y=Y, Xp=Xp, n=n, npred=npred, par=par)
+```
+
+```{r}
+model_string = textConnection(
+"model {
+  # Likelihood
+  for (i in 1:n) {
+    Y[i] ~ dbern(p[i])
+    logit(p[i]) = beta0 + X[i,] %*% beta
+  }
+  
+  # Predictive 
+  for (i in 1:npred){
+    ypred[i] ~ dbern(ppred[i])
+    logit(ppred[i]) <- beta0 + Xp[i,] %*% beta
+  }
+  
+  # Prior
+  beta0 ~ dnorm(0, 0.001)
+  for (j in 1:par) {
+    beta[j] ~ dnorm(0, 0.001)
+  }
+}")
+```
+
+```{r}
+# Building the Jags Model
+burn.in = 1000
+n.iter = 2000
+n.adapt = 200
+thin = 10
+n.chains = 1
+
+model <- jags.model(model_string,
+                    data=data_list,
+                    n.chains=n.chains,
+                    n.adapt=n.adapt)
+
+update(model, n.iter=burn.in)
+samples <- coda.samples(model,
+                        variable.names=c("beta","beta0", "ypred"),
+                        n.iter=n.iter,
+                        thin=thin)
+```
+
+```{r}
+for (i in 1:16) {
+  plot(samples[,i])
+}
+```
+
+
+```{r}
+Ytrue = splitted_dataset$test %>% select(satisfaction)
+Ytrue = Ytrue[,1]
+Yrep = samples[[1]][,7:(length(Ytrue)+6)]
+ppc_bars(Ytrue, Yrep) 
+```
+
+```{r}
+ppc_error_hist(Ytrue, Yrep[100:101,],bins=3)
+```
+
+
+## Bigger model
+
+```{r}
+# Preparing the parameters
+Y = as.numeric(
+      splitted_dataset$train$satisfaction
+    )
+
+X = as.matrix(
+      splitted_dataset$train %>% 
+        select(Customer.Type, Type.of.Travel, Seat.comfort, Departure.Arrival.time.convenient, Food.and.drink, Gate.location, Inflight.entertainment, Ease.of.Online.booking, On.board.service, Leg.room.service, Checkin.service, Arrival.Delay.in.Minutes)
+    )
+X = scale(X)
+
+Xp = as.matrix(
+      splitted_dataset$test %>% 
+        select(Customer.Type, Type.of.Travel, Seat.comfort, Departure.Arrival.time.convenient, Food.and.drink, Gate.location, Inflight.entertainment, Ease.of.Online.booking, On.board.service, Leg.room.service, Checkin.service, Arrival.Delay.in.Minutes)
+     )
+Xp = scale(Xp)
+
+n = dim(X)[1] # number of samples in the training data set
+npred = dim(Xp)[1] # number of samples in the test data set
+par = dim(X)[2] # dimension on the linear model
+
+data_list <- list(X=X, Y=Y, Xp=Xp, n=n, npred=npred, par=par)
+```
+
+```{r}
+model_string = textConnection(
+"model {
+  # Likelihood
+  for (i in 1:n) {
+    Y[i] ~ dbern(p[i])
+    logit(p[i]) = beta0 + X[i,] %*% beta
+  }
+  
+  # Predictive 
+  for (i in 1:npred){
+    ypred[i] ~ dbern(ppred[i])
+    logit(ppred[i]) <- beta0 + Xp[i,] %*% beta
+  }
+  
+  # Prior
+  beta0 ~ dnorm(0, 0.001)
+  for (j in 1:par) {
+    beta[j] ~ dnorm(0, 0.001)
+  }
+}")
+```
+
+```{r}
+# Building the Jags Model
+burn.in = 1000
+n.iter = 2000
+n.adapt = 200
+thin = 10
+n.chains = 1
+
+model <- jags.model(model_string,
+                    data=data_list,
+                    n.chains=n.chains,
+                    n.adapt=n.adapt)
+
+update(model, n.iter=burn.in)
+samples <- coda.samples(model,
+                        variable.names=c("beta","beta0", "ypred"),
+                        n.iter=n.iter,
+                        thin=thin)
+```
+
+```{r}
+for (i in 1:13) {
+  plot(samples[,i])
+}
+```
+
+```{r}
+plot_title <- ggtitle(expression(paste("Predictive Distribution ",f(x | x) )))
+plot_title <- ggtitle(expression("Predictive Distribution of " ~ f(y[new] ~ "|" ~ y)))
+
+
+Ytrue = splitted_dataset$test %>% select(satisfaction)
+Ytrue = Ytrue[,1]
+Yrep = samples[[1]][,(par+2):(length(Ytrue)+par+1)]
+ppc_bars(Ytrue, Yrep) + plot_title
+```
+
+```{r}
+ppc_error_hist(Ytrue, Yrep, bins=3)
+```
+
