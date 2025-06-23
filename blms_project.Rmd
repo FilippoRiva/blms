@@ -1,6 +1,8 @@
 ---
 title: "blms_project"
-output: html_document
+output:
+  html_document: default
+  pdf_document: default
 ---
 
 # BLMS Project 2025 : Airline Customer Satisfaction
@@ -10,13 +12,16 @@ output: html_document
 ## 0. Libraries and Setup
 
 ```{r}
-# Libraries imports
-library("BAS")
-library("tidyr")
-library("dplyr")
-library("ggplot2")
-library("rjags")
-library("bayesplot")
+# Libraries
+library("tidyr")     # data cleaning utilities
+library("dplyr")     # data manipulation
+
+library("BAS")       # Bayesian variable selection
+library("rjags")     # Gibbs sampler
+
+library("ggplot2")   # plotting utilities
+library("patchwork") # plotting utilities to handle grids and ggplot
+library("bayesplot") # plotting utilities for JAGS results
 
 # Setup
 set.seed(42) # for reproducibility
@@ -51,7 +56,7 @@ cat(paste("Size of the reduced dataset: ",dim(data)[1],"x", dim(data)[2]))
 ```
 
 ```{r}
-# Renaming columns with snake case
+# Renaming columns with snake_case
 data <- data %>%
   rename(
     satisfaction = satisfaction,
@@ -89,7 +94,7 @@ ggplot(data %>% filter(arrival_delay > 0), # filter to allow logarithmic scale i
   geom_boxplot() +
   labs(x = "Satisfaction", 
        y = "Arrival Delay",  
-       title = "Airline Customer Satisfaction Dataset") +
+       title = "Customer Satisfaction to Arrival Delay (log10 scaling)") +
   scale_y_log10()
 ```
 
@@ -111,7 +116,6 @@ cat("Unique values for type_of_travel:\n",
     paste(unique(data$type_of_travel), collapse = ", "), "\n\n")
 cat("Unique values for class:\n",
     paste(unique(data$class), collapse = ", "), "\n")
-
 ```
 
 ```{r}
@@ -142,7 +146,6 @@ head(data)
 summary(data)
 ```
 
-
 ```{r}
 # Split data 
 train_test_split <- function(dataset, split_percentage){
@@ -155,9 +158,11 @@ train_test_split <- function(dataset, split_percentage){
 ```
 
 ```{r}
-splitted_dataset <- train_test_split(data, 0.3)
-dim(splitted_dataset$train)
-dim(splitted_dataset$test)
+FULL_DATASET_SIZE = dim(data)[1]
+SPLIT = 0.3
+splitted_dataset <- train_test_split(data, SPLIT)
+cat("Train length :", dim(splitted_dataset$train)[1])
+cat("\nTest length :", dim(splitted_dataset$test)[1])
 ```
 
 ```{r}
@@ -169,8 +174,19 @@ write.csv(splitted_dataset$train,"data/reduced_train.csv", row.names = F)
 ## 2. Variable Selection
 
 ```{r}
+# Loading train and test set
+data_test <- read.csv("data/reduced_test.csv")
+data_train <- read.csv("data/reduced_train.csv")
+splitted_dataset = list(test=data_test, train=data_train)
+stopifnot( # Asserting that we are properly loading the splitted data
+  "Wrong train dataset size" = dim(splitted_dataset$train)[1] == FULL_DATASET_SIZE * (1 - SPLIT),
+  "Wrong test dataset size" = dim(splitted_dataset$test)[1]  == FULL_DATASET_SIZE * SPLIT
+  )
+```
+
+```{r}
 # Computing correlation 
-cors <- cor(data)["satisfaction", ]
+cors <- cor(splitted_dataset$train)["satisfaction", ]
 cors <- cors[names(cors) != "satisfaction"]
 
 # Visualization
@@ -194,18 +210,6 @@ ggplot(cors_df, aes(x = variable, y = 1, fill = correlation)) +
   labs(title = "Correlation with satisfaction")
 ```
 
-
-
-
-```{r}
-# Loading train and test set
-data_test <- read.csv("data/reduced_test.csv")
-data_train <- read.csv("data/reduced_train.csv")
-splitted_dataset = list(test=data_test, train=data_train)
-dim(splitted_dataset$train)
-dim(splitted_dataset$test)
-```
-
 ```{r}
 # Model Selection on the covariates suggested by the professor
 model <- bas.lm(satisfaction ~ age + seat_comfort + flight_distance + class_eco + class_eco_plus + departure_delay + arrival_delay, 
@@ -219,7 +223,7 @@ model <- bas.lm(satisfaction ~ age + seat_comfort + flight_distance + class_eco 
 summary(model)
 ```
 
-```{r}
+```{r, fig.width=12, fig.height=6}
 image(model, cex.axis=0.7)
 ```
 
@@ -241,6 +245,16 @@ image(full_model, cex.axis=0.8, vlas=2)
 ```
 
 ```{r}
+best_model = which.max(full_model$logmarg)
+
+# Print the selected subset of variables:
+selected_preds = full_model$which[[best_model]]+1
+cat("Best variables:\n", 
+    paste(" ", 1:11, full_model$namesx[selected_preds][2:12], collapse=",\n"),
+    sep="")
+```
+
+```{r}
 # Get predictions on the test set using BMA
 preds <- predict(
   model,
@@ -249,11 +263,27 @@ preds <- predict(
   se.fit=TRUE 
 ) 
 
-plot(splitted_dataset$test$seat_comfort, preds$fit, col="darkorange", xlab="Seat.comfort", ylab="satisfaction", ylim=c(-0.1,1.1))
-points(splitted_dataset$test$seat_comfort, splitted_dataset$test$satisfaction, col="steelblue")
+df <- splitted_dataset$test
+df$predicted <- preds$fit
+
+df <- pivot_longer(
+  df %>% 
+    filter(seat_comfort != 0) %>%
+    group_by(seat_comfort) %>%
+    summarise(
+      avg_true = mean(satisfaction),
+      avg_pred = mean(predicted)
+    ),
+  cols = c(avg_true, avg_pred), 
+  names_to = "type", values_to = "satisfaction")
+
+ggplot(df, aes(x = seat_comfort, y = satisfaction, fill = type)) +
+  geom_col(position = "dodge") +
+  labs(x = "Seat Comfort", y = "Satisfaction", 
+       title = "Avg True vs Predicted Satisfaction")
 ```
 
-## 3. Bernoulli Regression using JAGS
+## 3. Bernoulli Regression using JAGS (Suggested Variables)
 
 $$
 \begin{align*}
@@ -313,11 +343,11 @@ model_string = textConnection(
 
 ```{r}
 # Building the Jags Model
-burn.in = 1000
+burn.in = 200
 n.iter = 2000
 n.adapt = 200
-thin = 10
-n.chains = 1
+thin = 2
+n.chains = 2
 
 model <- jags.model(model_string,
                     data=data_list,
@@ -332,8 +362,53 @@ samples <- coda.samples(model,
 ```
 
 ```{r}
-for (i in 1:16) {
-  plot(samples[,i])
+mcmc_trace(samples,regex_pars="beta")
+```
+
+```{r}
+mcmc_areas_ridges(samples,regex_pars="beta", prob = 0.98)  
+```
+
+```{r}
+mcmc_trace(samples, pars = c("ypred[1]","ypred[2]","ypred[3]","ypred[4]","ypred[5]","ypred[6]"))
+```
+
+```{r}
+# Compute a df contatining sampling counts
+preds_df <- data.frame(samples[[1]]) %>%
+  pivot_longer(everything(), names_to = "variable", values_to = "prediction") %>%
+  group_by(variable) %>%
+  filter(grepl("ypred", variable)) %>%
+  summarise(
+    zeros = sum(prediction==0),
+    ones = sum(prediction==1),
+  ) %>%
+  pivot_longer(cols=c("zeros", "ones"), names_to = "value", values_to = "count")
+
+# obtains the ones and zeros counts for a certain variable
+get_preds <- function(idx) {
+  res <- preds_df %>% filter(variable==paste("ypred.",idx,".", sep=""))
+  return (res)
+}
+
+# plots variables counts in a grid
+plots <- lapply(1:6, function(i) {
+  ggplot(get_preds(i)) +
+    geom_col(aes(x = variable, y = count, fill = value), position = "dodge") +
+    ggtitle(paste("ypred", i))
+})
+
+wrap_plots(plots, ncol = 3)
+```
+
+```{r, fig.width=8}
+par(mfrow=c(2,3))
+acf(samples[[1]][,6], main="Beta[0]")
+for (i in 1:5){
+  acf(samples[[1]][,i], main=paste("Beta[", i,"]", sep=""))
+}
+for (i in 7:10){
+  acf(samples[[1]][,i], main=paste("Ypred[", i-6,"]", sep=""))
 }
 ```
 
@@ -345,17 +420,30 @@ ppc_bars(Ytrue, Yrep)
 ```
 
 ```{r}
-ppc_error_hist(Ytrue, Yrep[100:101,],bins=3)
+ppc_error_hist(Ytrue, Yrep[100:105,],bins=3)+
+  theme(axis.text.y = element_text(),
+        axis.text.x = element_text()) +
+  ggtitle("Residual Errors on Predictions")
 ```
 
-## Bigger model
+```{r}
+compute_accuracy <- function(Ytrue, Ypred) {
+  return(round(sum(Ytrue == Ypred) / length(Ytrue), digits=4))
+}
+avg_accuracy <- function(Ytrue, Ypreds) {
+  accs <- apply(Ypreds, 1, function(row) compute_accuracy(Ytrue, row))
+  return(round(mean(accs), 4))
+}
+```
+
+```{r}
+cat(paste("Average Accuracy: ", avg_accuracy(Ytrue, Yrep), "%", sep=""))
+```
+
+## 3. Bernoulli Regression using JAGS (Selected Variables)
 
 ```{r}
 # Preparing the parameters
-Y = as.numeric(
-      splitted_dataset$train$satisfaction
-    )
-
 X = as.matrix(
       splitted_dataset$train %>% 
         select(customer_type, type_of_travel, seat_comfort, departure_arrival_convenient, food_and_drink, gate_location, inflight_entertainment, ease_of_online_booking, on_board_service, leg_room_service, checkin_service, arrival_delay)
@@ -368,9 +456,9 @@ Xp = as.matrix(
      )
 Xp = scale(Xp)
 
-n = dim(X)[1] # number of samples in the training data set
+n =     dim(X)[1]  # number of samples in the training data set
 npred = dim(Xp)[1] # number of samples in the test data set
-par = dim(X)[2] # dimension on the linear model
+par =   dim(X)[2]  # dimension on the linear model
 
 data_list <- list(X=X, Y=Y, Xp=Xp, n=n, npred=npred, par=par)
 ```
@@ -400,11 +488,11 @@ model_string = textConnection(
 
 ```{r}
 # Building the Jags Model
-burn.in = 1000
-n.iter = 2000
-n.adapt = 200
-thin = 10
-n.chains = 1
+burn.in = 200
+n.iter = 3000
+n.adapt = 300
+thin = 3
+n.chains = 2
 
 model <- jags.model(model_string,
                     data=data_list,
@@ -419,14 +507,62 @@ samples <- coda.samples(model,
 ```
 
 ```{r}
-for (i in 1:13) {
-  plot(samples[,i])
+mcmc_trace(samples,pars=c("beta0", "beta[1]", "beta[2]", "beta[3]", "beta[4]", "beta[5]"))
+```
+
+```{r}
+mcmc_trace(samples,pars=c("beta[6]", "beta[7]", "beta[8]", "beta[9]", "beta[10]", "beta[11]", "beta[12]"))
+```
+
+```{r}
+mcmc_areas_ridges(samples,regex_pars="beta", prob = 0.98)  
+```
+
+```{r}
+mcmc_trace(samples, pars = c("ypred[1]","ypred[2]","ypred[3]","ypred[4]","ypred[5]","ypred[6]"))
+```
+
+```{r}
+# Compute a df contatining sampling counts
+preds_df <- data.frame(samples[[1]]) %>%
+  pivot_longer(everything(), names_to = "variable", values_to = "prediction") %>%
+  group_by(variable) %>%
+  filter(grepl("ypred", variable)) %>%
+  summarise(
+    zeros = sum(prediction==0),
+    ones = sum(prediction==1),
+  ) %>%
+  pivot_longer(cols=c("zeros", "ones"), names_to = "value", values_to = "count")
+
+# obtains the ones and zeros counts for a certain variable
+get_preds <- function(idx) {
+  res <- preds_df %>% filter(variable==paste("ypred.",idx,".", sep=""))
+  return (res)
+}
+
+# plots variables counts in a grid
+plots <- lapply(1:6, function(i) {
+  ggplot(get_preds(i)) +
+    geom_col(aes(x = variable, y = count, fill = value), position = "dodge") +
+    ggtitle(paste("ypred", i))
+})
+
+wrap_plots(plots, ncol = 3)
+```
+
+```{r, fig.width=8}
+par(mfrow=c(2,3))
+acf(samples[[1]][,13], main="Beta[0]")
+for (i in 1:12){
+  acf(samples[[1]][,i], main=paste("Beta[", i,"]", sep=""))
+}
+for (i in 14:18){
+  acf(samples[[1]][,i], main=paste("Ypred[", i-6,"]", sep=""))
 }
 ```
 
 ```{r}
-plot_title <- ggtitle(expression(paste("Predictive Distribution ",f(x | x) )))
-plot_title <- ggtitle(expression("Predictive Distribution of " ~ f(y[new] ~ "|" ~ y)))
+plot_title <- ggtitle("Prediction v.s. True counts")
 
 
 Ytrue = splitted_dataset$test %>% select(satisfaction)
@@ -436,5 +572,12 @@ ppc_bars(Ytrue, Yrep) + plot_title
 ```
 
 ```{r}
-ppc_error_hist(Ytrue, Yrep[100:105,], bins=3)
+ppc_error_hist(Ytrue, Yrep[100:105,], bins=3)+
+  theme(axis.text.y = element_text(),
+        axis.text.x = element_text()) +
+  ggtitle("Residual Errors on Predictions")
+```
+
+```{r}
+cat(paste("Average Accuracy: ", avg_accuracy(Ytrue, Yrep), "%", sep=""))
 ```
