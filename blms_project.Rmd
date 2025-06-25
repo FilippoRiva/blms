@@ -19,6 +19,8 @@ library("dplyr")     # data manipulation
 library("BAS")       # Bayesian variable selection
 library("rjags")     # Gibbs sampler
 
+
+library("corrplot")  # plotting correlation matrices
 library("ggplot2")   # plotting utilities
 library("patchwork") # plotting utilities to handle grids and ggplot
 library("bayesplot") # plotting utilities for JAGS results
@@ -185,6 +187,16 @@ stopifnot( # Asserting that we are properly loading the splitted data
 ```
 
 ```{r}
+# Calculate correlation matrix
+cor_mat <- cor(splitted_dataset$train %>% 
+                 select(satisfaction, age, seat_comfort, flight_distance, class_eco, class_eco_plus, departure_delay, arrival_delay))
+
+# Plot
+corrplot(cor_mat, method = "color", type = "upper", 
+         tl.col = "black", tl.srt = 45)
+```
+
+```{r}
 # Computing correlation 
 cors <- cor(splitted_dataset$train)["satisfaction", ]
 cors <- cors[names(cors) != "satisfaction"]
@@ -206,7 +218,8 @@ ggplot(cors_df, aes(x = variable, y = 1, fill = correlation)) +
   gradient +
   theme_minimal() +
   theme(axis.text.x = element_text(angle = 45, hjust = 1),
-        axis.title = element_blank())+
+        axis.title = element_blank(), 
+        axis.text.y= element_blank())+
   labs(title = "Correlation with satisfaction")
 ```
 
@@ -368,6 +381,33 @@ mcmc_trace(samples,regex_pars="beta")
 ```{r}
 mcmc_areas_ridges(samples,regex_pars="beta", prob = 0.98)  
 ```
+```{r}
+summary_stats <- summary(samples)
+
+# Means
+posterior_means <- summary_stats$statistics[,"Mean"]
+
+# Variances
+posterior_vars <- summary_stats$statistics[,"SD"]^2
+
+# Filter only beta parameters
+beta_means <- posterior_means[grep("^beta\\[", names(posterior_means))]
+beta_vars <- posterior_vars[grep("^beta\\[", names(posterior_vars))]
+
+# Dataframe for visualization
+beta_df <- data.frame(
+  Parameter = names(beta_means),
+  Variable = colnames(X),
+  Mean = beta_means,
+  Variance = beta_vars
+)
+
+# Sort by mean
+beta_df <- beta_df[order(beta_df$Mean), ]
+
+rownames(beta_df) <- NULL #reset row names
+beta_df
+```
 
 ```{r}
 mcmc_trace(samples, pars = c("ypred[1]","ypred[2]","ypred[3]","ypred[4]","ypred[5]","ypred[6]"))
@@ -440,7 +480,7 @@ avg_accuracy <- function(Ytrue, Ypreds) {
 cat(paste("Average Accuracy: ", avg_accuracy(Ytrue, Yrep), "%", sep=""))
 ```
 
-## 3. Bernoulli Regression using JAGS (Selected Variables)
+## 4. Bernoulli Regression using JAGS (Selected Variables)
 
 ```{r}
 # Preparing the parameters
@@ -462,6 +502,7 @@ par =   dim(X)[2]  # dimension on the linear model
 
 data_list <- list(X=X, Y=Y, Xp=Xp, n=n, npred=npred, par=par)
 ```
+
 
 ```{r}
 model_string = textConnection(
@@ -517,6 +558,35 @@ mcmc_trace(samples,pars=c("beta[6]", "beta[7]", "beta[8]", "beta[9]", "beta[10]"
 ```{r}
 mcmc_areas_ridges(samples,regex_pars="beta", prob = 0.98)  
 ```
+
+```{r}
+summary_stats <- summary(samples)
+
+# Means
+posterior_means <- summary_stats$statistics[,"Mean"]
+
+# Variances
+posterior_vars <- summary_stats$statistics[,"SD"]^2
+
+# Filter only beta parameters
+beta_means <- posterior_means[grep("^beta\\[", names(posterior_means))]
+beta_vars <- posterior_vars[grep("^beta\\[", names(posterior_vars))]
+
+# Dataframe for visualization
+beta_df <- data.frame(
+  Parameter = names(beta_means),
+  Variable = colnames(X),
+  Mean = beta_means,
+  Variance = beta_vars
+)
+
+# Sort by mean
+beta_df <- beta_df[order(beta_df$Mean), ]
+
+rownames(beta_df) <- NULL #reset row names
+beta_df
+```
+
 
 ```{r}
 mcmc_trace(samples, pars = c("ypred[1]","ypred[2]","ypred[3]","ypred[4]","ypred[5]","ypred[6]"))
@@ -581,3 +651,140 @@ ppc_error_hist(Ytrue, Yrep[100:105,], bins=3)+
 ```{r}
 cat(paste("Average Accuracy: ", avg_accuracy(Ytrue, Yrep), "%", sep=""))
 ```
+## 5. Spike and Slab in a Logit Bernoulli Regression
+
+
+$$
+\begin{align*}
+  & y_i \mid p_i \overset{ind}\sim \mathscr{B}e(p_i), &\qquad i=1,\ldots,n \\
+  & \log\left(\frac{p_i}{1-p_i}\right) = \beta_0 + x_i \beta, &\qquad \rightarrow\text{logistic link} \\
+  & \beta_j \mid \gamma_j \overset{ind}\sim (1-\gamma_j)\,\delta_{(0)} + \gamma_j\,\mathscr{N}\left(0,    100\right), \\
+  & \gamma_j \mid \theta_j \overset{ind}\sim \mathscr{B}e\left(\theta_j\right), \\[5pt]
+  & \theta_{j} \overset{iid}\sim \mathcal U_{0,1}\left(\theta_j\right), &\rightarrow[0,1]\text{ uniform}
+\end{align*}
+$$
+
+
+```{r}
+# Preparing the parameters
+Y = as.numeric( splitted_dataset$train$satisfaction )
+
+X = as.matrix( splitted_dataset$train %>% select(-satisfaction) ) # full train set 
+X = scale(X)
+
+Xp = as.matrix( splitted_dataset$test %>% select(-satisfaction) ) # full test set
+Xp = scale(Xp)
+
+n =     dim(X)[1]  # number of samples in the training data set
+npred = dim(Xp)[1] # number of samples in the test data set
+par =   dim(X)[2]  # dimension on the linear model
+
+data_list <- list(X=X, Y=Y, Xp=Xp, n=n, npred=npred, par=par)
+```
+
+```{r}
+model_string = textConnection(
+"model {
+  # Likelihood
+  for (i in 1:n) {
+    Y[i] ~ dbern(p[i])
+    logit(p[i]) = beta0 + X[i,] %*% beta
+  }
+  
+  # Predictive 
+  for (i in 1:npred){
+    ypred[i] ~ dbern(ppred[i])
+    logit(ppred[i]) <- beta0 + Xp[i,] %*% beta
+  }
+  
+  # Model encoding
+  for (j in 1:par) {
+  	inclusionindex[j] = gamma[j]*pow(2,j)
+  }
+  model_encoding = 1 + sum(inclusionindex[])
+  
+  # Prior
+  beta0 ~ dnorm(0, 0.001)
+  for (j in 1:par) {
+    gamma[j] ~ dbern(theta[j])
+    theta[j] ~ dunif(0,1)
+    beta_temp[j] ~ dnorm(0, 0.001)
+    beta[j] = gamma[j] * beta_temp[j]
+  }
+}")
+```
+
+```{r}
+# initializing the model making betas and gamma start from 0 and theta being 0.5
+inits = list(beta0=0, beta_temp=rep(0,par), gamma=rep(0,par), theta=rep(0.5,par))
+
+burn.in = 500
+n.iter = 4000
+n.adapt = 200
+thin = 3
+n.chains = 1
+
+model <- jags.model(model_string,
+                    data=data_list,
+                    n.chains=n.chains,
+                    n.adapt=n.adapt,
+                    inits=inits)
+
+update(model, n.iter=burn.in)
+samples <- coda.samples(model,
+                        variable.names=c("beta","beta0", "ypred", "model_encoding", "gamma"),
+                        n.iter=n.iter,
+                        thin=thin)
+```
+
+```{r}
+# Distribution over model encodings
+visited_models = sort(table(samples[,"model_encoding"]),decreasing=TRUE)
+barplot(visited_models/sum(table(samples[,"model_encoding"])),xlab="Model encoding",ylab="Posterior probability")
+```
+
+```{r}
+# Posterior probabilities over gamma (inclusion of variables in the model)
+gamma_samples = samples[[1]][,24:45]
+post_mean_g = apply(gamma_samples, 2, "mean")
+
+# Print the probabilities of inclusion:
+data.frame(post_mean_g)
+```
+
+```{r}
+# Get the unique profiles and sort the results:
+unique_model = unique(as.matrix(gamma_samples),MARGIN=1)
+freq = apply(unique_model,1,function(b) sum(apply(gamma_samples,MARGIN=1, function(a) all(a == b))))
+most_freq = as.logical(unique_model[which.max(freq),])
+most_freq_idxs = which(most_freq == TRUE)
+
+# Select the HPD model and print the variable names:
+cat(paste(1:10,":", colnames(X)[most_freq]), sep=",\n")
+```
+
+```{r}
+for(k in most_freq_idxs){ 
+  plot(samples[[1]][,k], main=paste("beta[",k,"] : ",colnames(X)[k], sep="")) }
+```
+
+```{r}
+plot_title <- ggtitle("Prediction v.s. True counts")
+
+Ytrue = splitted_dataset$test %>% select(satisfaction)
+Ytrue = Ytrue[,1]
+Yrep = samples[[1]][,47:(length(Ytrue)+46)]
+ppc_bars(Ytrue, Yrep) + plot_title
+```
+
+```{r}
+ppc_error_hist(Ytrue, Yrep[100:105,], bins=3)+
+  theme(axis.text.y = element_text(),
+        axis.text.x = element_text()) +
+  ggtitle("Residual Errors on Predictions")
+```
+
+```{r}
+cat(paste("Average Accuracy: ", avg_accuracy(Ytrue, Yrep), "%", sep=""))
+```
+
